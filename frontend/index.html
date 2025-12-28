@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>驾驶员行为实时检测系统</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- 背景动画 -->
+    <div class="background-animation"></div>
+    
+    <!-- 主容器 -->
+    <div class="container">
+        <!-- 头部 -->
+        <header class="header">
+            <h1 class="title">
+                <span class="icon">🚗</span>
+                驾驶员行为实时检测系统
+            </h1>
+            <p class="subtitle">基于YOLOv8的智能行为识别 - 抽烟 · 用手机 · 喝水</p>
+        </header>
+
+        <!-- Tab切换 -->
+        <div class="tabs">
+            <button class="tab-btn active" data-tab="upload">
+                <span class="tab-icon">📹</span>
+                视频上传检测
+            </button>
+            <button class="tab-btn" data-tab="realtime">
+                <span class="tab-icon">📸</span>
+                实时摄像头检测
+            </button>
+        </div>
+
+        <!-- 视频上传Tab -->
+        <div class="tab-content active" id="upload-tab">
+            <div class="card">
+                <div class="card-header">
+                    <h2>上传视频文件</h2>
+                    <p>支持 MP4, AVI, MOV 等格式</p>
+                </div>
+                
+                <div class="upload-area" id="upload-area">
+                    <div class="upload-icon">📁</div>
+                    <p>点击或拖拽视频文件到此处</p>
+                    <input type="file" id="video-file" accept="video/*" hidden>
+                    <button class="btn btn-primary" id="select-file-btn">选择文件</button>
+                </div>
+
+                <div class="file-info" id="file-info" style="display: none;">
+                    <p><strong>已选择:</strong> <span id="filename"></span></p>
+                    <button class="btn btn-success" id="upload-btn">开始检测</button>
+                </div>
+
+                <div class="progress-bar" id="progress-bar" style="display: none;">
+                    <div class="progress-fill" id="progress-fill"></div>
+                    <span class="progress-text" id="progress-text">处理中...</span>
+                </div>
+            </div>
+
+            <!-- 检测结果 -->
+            <div class="results-container" id="upload-results" style="display: none;">
+                <div class="card">
+                    <h3>检测结果</h3>
+                    <div class="video-preview">
+                        <video id="result-video" controls></video>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <h3>统计报告</h3>
+                    <div class="statistics" id="upload-statistics"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 实时检测Tab -->
+        <div class="tab-content" id="realtime-tab">
+            <div class="card">
+                <div class="card-header">
+                    <h2>实时摄像头检测</h2>
+                    <p>使用您的摄像头进行实时行为检测</p>
+                </div>
+
+                <div class="camera-controls">
+                    <button class="btn btn-success" id="start-camera">启动摄像头</button>
+                    <button class="btn btn-danger" id="stop-camera" style="display: none;">停止检测</button>
+                </div>
+
+                <div class="video-container">
+                    <video id="camera-video" autoplay playsinline></video>
+                    <canvas id="detection-canvas"></canvas>
+                </div>
+            </div>
+
+            <div class="card">
+                <h3>实时统计</h3>
+                <div class="statistics" id="realtime-statistics">
+                    <div class="stat-item">
+                        <span class="stat-label">🚬 抽烟:</span>
+                        <span class="stat-value" id="stat-smoke">0</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">📱 用手机:</span>
+                        <span class="stat-value" id="stat-phone">0</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">🥤 喝水:</span>
+                        <span class="stat-value" id="stat-drink">0</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 底部 -->
+        <footer class="footer">
+            <p>© 2025 驾驶员行为检测系统 | Powered by YOLOv8n</p>
+        </footer>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
