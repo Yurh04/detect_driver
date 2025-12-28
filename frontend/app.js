@@ -13,11 +13,11 @@ let realtimeStats = { Smoke: 0, Phone: 0, Drink: 0 };
 
 // ==================== DOM元素 ====================
 const elements = {
-    // Tab切换
-    tabBtns: document.querySelectorAll('.tab-btn'),
-    tabContents: document.querySelectorAll('.tab-content'),
+    // Navigation
+    navItems: document.querySelectorAll('.nav-item'),
+    viewContents: document.querySelectorAll('.view-content'),
 
-    // 视频上传
+    // Video Upload
     uploadArea: document.getElementById('upload-area'),
     videoFile: document.getElementById('video-file'),
     selectFileBtn: document.getElementById('select-file-btn'),
@@ -31,7 +31,7 @@ const elements = {
     resultVideo: document.getElementById('result-video'),
     uploadStatistics: document.getElementById('upload-statistics'),
 
-    // 实时检测
+    // Realtime Monitor
     startCameraBtn: document.getElementById('start-camera'),
     stopCameraBtn: document.getElementById('stop-camera'),
     cameraVideo: document.getElementById('camera-video'),
@@ -50,21 +50,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // ==================== Tab切换功能 ====================
 function initTabSwitching() {
-    elements.tabBtns.forEach(btn => {
+    elements.navItems.forEach(btn => {
         btn.addEventListener('click', () => {
             const tabId = btn.dataset.tab;
 
-            // 更新按钮状态
-            elements.tabBtns.forEach(b => b.classList.remove('active'));
+            // Update Menu
+            elements.navItems.forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
 
-            // 更新内容显示
-            elements.tabContents.forEach(content => {
+            // Update Content
+            elements.viewContents.forEach(content => {
                 content.classList.remove('active');
             });
             document.getElementById(`${tabId}-tab`).classList.add('active');
 
-            // 如果切换到其他tab，停止摄像头
+            // Stop camera if leaving realtime
             if (tabId !== 'realtime' && cameraStream) {
                 stopCamera();
             }
@@ -325,51 +325,84 @@ async function detectCurrentFrame() {
 function drawDetections(detections) {
     const canvas = elements.detectionCanvas;
     const ctx = canvas.getContext('2d');
-
-    // 清空canvas
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // 颜色映射
     const colors = {
-        0: '#ef4444', // Smoke - 红色
-        1: '#10b981', // Phone - 绿色
-        2: '#3b82f6'  // Drink - 蓝色
+        0: '#f43f5e', // Smoke - Red
+        1: '#10b981', // Phone - Green
+        2: '#0ea5e9'  // Drink - Blue
     };
 
-    // 绘制每个检测框
     detections.forEach(det => {
         const [x1, y1, x2, y2] = det.bbox;
-        const color = colors[det.class_id] || '#ffffff';
+        const color = colors[det.class_id] || '#cbd5e1';
+        const w = x2 - x1;
+        const h = y2 - y1;
 
-        // 绘制边界框
+        // 1. Precision Reticle (Corners)
         ctx.strokeStyle = color;
-        ctx.lineWidth = 3;
-        ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+        ctx.lineWidth = 2;
+        const len = Math.min(w, h) * 0.15;
 
-        // 绘制标签背景
-        const label = `${det.class_name}: ${(det.confidence * 100).toFixed(1)}%`;
-        ctx.font = '16px Arial';
-        const textWidth = ctx.measureText(label).width;
+        // Draw 4 corners
+        drawCorner(ctx, x1, y1, len, len, 0); // TL
+        drawCorner(ctx, x2, y1, -len, len, 0); // TR
+        drawCorner(ctx, x1, y2, len, -len, 0); // BL
+        drawCorner(ctx, x2, y2, -len, -len, 0); // BR
+
+        // 2. Subtle Fill
+        ctx.fillStyle = hexToRgba(color, 0.05);
+        ctx.fillRect(x1, y1, w, h);
+
+        // 3. Technical Data Overlay
+        const label = det.class_name.toUpperCase();
+        const conf = (det.confidence * 100).toFixed(0) + '%';
+
+        ctx.font = 'bold 12px "Space Grotesk", monospace';
+        const labelWidth = ctx.measureText(label).width;
+
+        // Lead-line and label
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x1 - 10, y1 - 10);
+        ctx.lineTo(x1 - 15, y1 - 10);
+        ctx.stroke();
 
         ctx.fillStyle = color;
-        ctx.fillRect(x1, y1 - 25, textWidth + 10, 25);
+        ctx.fillText(label, x1 - 15 - labelWidth, y1 - 14);
 
-        // 绘制标签文字
-        ctx.fillStyle = 'white';
-        ctx.fillText(label, x1 + 5, y1 - 7);
+        ctx.fillStyle = '#f8fafc';
+        ctx.font = 'normal 10px "Space Grotesk", monospace';
+        ctx.fillText(conf, x1 - 15 - ctx.measureText(conf).width, y1 - 2);
     });
 }
 
+function drawCorner(ctx, x, y, w, h) {
+    ctx.beginPath();
+    ctx.moveTo(x, y + h);
+    ctx.lineTo(x, y);
+    ctx.lineTo(x + w, y);
+    ctx.stroke();
+}
+
+function hexToRgba(hex, alpha) {
+    const r = parseInt(hex.slice(1, 3), 16);
+    const g = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
 function updateRealtimeStats(detections) {
-    // 统计当前帧的行为
+    // We only update if something is detected to avoid flickering to 0 too fast
+    // or keep the current session counts
     detections.forEach(det => {
         realtimeStats[det.class_name]++;
     });
 
-    // 更新显示
-    elements.statSmoke.textContent = realtimeStats.Smoke;
-    elements.statPhone.textContent = realtimeStats.Phone;
-    elements.statDrink.textContent = realtimeStats.Drink;
+    // Update display with formatting
+    elements.statSmoke.textContent = realtimeStats.Smoke.toLocaleString();
+    elements.statPhone.textContent = realtimeStats.Phone.toLocaleString();
+    elements.statDrink.textContent = realtimeStats.Drink.toLocaleString();
 }
 
 // ==================== 工具函数 ====================

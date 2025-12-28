@@ -27,6 +27,7 @@ class DetectionEngine:
         """
         self.model_path = model_path
         self.model = None
+        self.helper_model = None  # 辅助定位模型（用于找人）
         self.class_names = []  # 将从模型自动获取
         self.class_colors = {}  # 将根据类别数自动生成
         self.load_model()
@@ -61,6 +62,21 @@ class DetectionEngine:
                 self.class_colors = {0: (255, 255, 255)}
             
             logger.info("模型加载成功")
+            
+            # 检查是否需要辅助模型：如果主模型里没有 person 类，且运行在监控视角视频，我们需要辅助定位
+            # 即使不是监控视频，有辅助找人也能极大提升小目标的二阶段识别率
+            if 'person' not in self.class_names:
+                try:
+                    helper_path = "models/yolov8n.pt"
+                    if not os.path.exists(helper_path):
+                        helper_path = "yolov8n.pt" # 尝试根目录
+                    
+                    logger.info(f"主模型缺少定位类，正在加载辅助定位模型: {helper_path}")
+                    self.helper_model = YOLO(helper_path)
+                    logger.info("辅助定位模型加载成功")
+                except Exception as e:
+                    logger.warning(f"辅助定位模型加载失败（但不影响主逻辑）: {e}")
+                    
         except Exception as e:
             logger.error(f"模型加载失败: {str(e)}")
             raise
@@ -127,72 +143,148 @@ class DetectionEngine:
                         'class_name': final_class_name
                     })
             
-            # === 两阶段检测优化 (针对通用模型的小目标) ===
-            # 如果是通用模型，对每个检测到的 Driver (person) 进行局部二次检测
-            if 'person' in self.class_names and len(detections) > 0:
+            # === 定义类别特定阈值 (压制误报，增加召回) ===
+            # Smoke: 误报多，样本少 -> 设高阈值 (0.65)
+            # Drink: 样本多，较重要 -> 设低阈值 (0.12)
+            # Phone: 保持中等 (0.25)
+            # Driver: 定位用 (0.25)
+            class_thresholds = {
+                'Smoke': 0.80,
+                'Drink': 0.10,
+                'Phone': 0.25,
+                'Driver': 0.25
+            }
+            
+            # 过滤第一阶段检测结果
+            detections = [
+                d for d in detections 
+                if d['confidence'] >= class_thresholds.get(d['class_name'], conf_threshold)
+            ]
+            
+            # === 两阶段检测优化 (深度重构) ===
+            # 目标：无论主模型是否有person类，只要有定位能力，就进行裁剪放大检测
+            
+            # 1. 寻找潜在的驾驶员框 (定位源)
+            driver_boxes = []
+            
+            # 优先从本轮已有的 detections 中找 Driver (如果是通用模型，detections 里已经有 Driver 了)
+            driver_boxes = [d['bbox'] for d in detections if d['class_name'] == 'Driver']
+            
+            # 如果主模型没有定位到人，且我们有辅助模型，则调用辅助模型专门找人
+            if not driver_boxes and self.helper_model:
+                try:
+                    # 降低阈值以提高定位成功率
+                    helper_results = self.helper_model(image, conf=0.15, verbose=False)[0]
+                    if helper_results.boxes is not None:
+                        h_boxes = helper_results.boxes.xyxy.cpu().numpy()
+                        h_classes = helper_results.boxes.cls.cpu().numpy().astype(int)
+                        h_names = self.helper_model.names
+                        
+                        for hb, hc in zip(h_boxes, h_classes):
+                            if h_names[hc] == 'person':
+                                driver_boxes.append([float(x) for x in hb.tolist()])
+                                # 如果是辅助模型找的人，我们也顺便存入detections供展示（可选）
+                                detections.append({
+                                    'bbox': [float(x) for x in hb.tolist()],
+                                    'confidence': 0.8, # 辅助模型定位置信度
+                                    'class_id': 99,
+                                    'class_name': 'Driver'
+                                })
+                except Exception as e:
+                    logger.warning(f"辅助定位推理失败: {e}")
+            
+            # 2. 对每个定位到的位置进行“特写”检测
+            if driver_boxes:
                 img_h, img_w = image.shape[:2]
-                
-                # 收集所有Driver的框
-                driver_boxes = [d['bbox'] for d in detections if d['class_name'] == 'Driver']
-                
                 for d_box in driver_boxes:
                     x1, y1, x2, y2 = [int(v) for v in d_box]
                     
-                    # 扩大裁剪区域 (Margin)，包含手部活动范围
-                    margin_x = int((x2 - x1) * 0.2)
-                    margin_y = int((y2 - y1) * 0.2)
+                    # 裁剪区域建议：扩大范围以包含更多可能的行为区域
+                    margin_x = int((x2 - x1) * 0.35)  # 增加横向范围
+                    margin_y = int((y2 - y1) * 0.3)   # 增加纵向范围
                     crop_x1 = max(0, x1 - margin_x)
                     crop_y1 = max(0, y1 - margin_y)
                     crop_x2 = min(img_w, x2 + margin_x)
-                    crop_y2 = min(img_h, y2 + margin_y + int((y2 - y1) * 0.3)) # 下方多留点空间看手
+                    crop_y2 = min(img_h, y2 + margin_y + int((y2 - y1) * 0.5))  # 向下扩展更多
                     
-                    # 裁剪图像
                     if crop_x2 <= crop_x1 or crop_y2 <= crop_y1: continue
                     crop_img = image[crop_y1:crop_y2, crop_x1:crop_x2]
                     
-                    # 局部检测（使用更低的阈值）
+                    # 使用【主模型】对"特写"进行识别，适当调高阈值以减少误报
                     try:
-                        # 局部推理
-                        sub_results = self.model(crop_img, conf=0.1, verbose=False)[0]
-                        if sub_results.boxes is not None and len(sub_results.boxes) > 0:
-                            sub_boxes = sub_results.boxes.xyxy.cpu().numpy()
-                            sub_confs = sub_results.boxes.conf.cpu().numpy()
-                            sub_cls_ids = sub_results.boxes.cls.cpu().numpy().astype(int)
+                        # 0.2 是一个较平衡的阈值，过低会导致背景噪点被识别为行为
+                        detect_conf = 0.20 if 'person' not in self.class_names else 0.15
+                        sub_results = self.model(crop_img, conf=detect_conf, verbose=False)[0]
+                        if sub_results.boxes is not None:
+                            s_boxes = sub_results.boxes.xyxy.cpu().numpy()
+                            s_confs = sub_results.boxes.conf.cpu().numpy()
+                            s_cls_ids = sub_results.boxes.cls.cpu().numpy().astype(int)
                             
-                            for sb, sc, sid in zip(sub_boxes, sub_confs, sub_cls_ids):
+                            for sb, sc, sid in zip(s_boxes, s_confs, s_cls_ids):
                                 s_name = self.class_names[sid]
                                 s_final_name = None
                                 s_final_id = -1
                                 
-                                # 只关注局部图中的小物体
-                                if s_name == 'cell phone':
-                                    s_final_name = 'Phone'
-                                    s_final_id = 1
-                                elif s_name in ['bottle', 'cup', 'wine glass']:
-                                    s_final_name = 'Drink'
-                                    s_final_id = 2
-                                elif s_name == 'cigarette': # 虽然COCO没有，但以防万一
-                                    s_final_name = 'Smoke'
-                                    s_final_id = 0
+                                # 将局部坐标映射回全局坐标
+                                g_box = [
+                                    float(sb[0] + crop_x1),
+                                    float(sb[1] + crop_y1),
+                                    float(sb[2] + crop_x1),
+                                    float(sb[3] + crop_y1)
+                                ]
                                 
-                                if s_final_name:
-                                    # 坐标还原到原图，并确保转换为Python原生float类型
-                                    global_box = [
-                                        float(sb[0] + crop_x1),
-                                        float(sb[1] + crop_y1),
-                                        float(sb[2] + crop_x1),
-                                        float(sb[3] + crop_y1)
-                                    ]
-                                    
-                                    # 添加到最终结果
-                                    detections.append({
-                                        'bbox': global_box,
-                                        'confidence': float(sc),
-                                        'class_id': int(s_final_id),
-                                        'class_name': s_final_name
-                                    })
+                                # 处理自定义模型的类别映射
+                                if 'person' not in self.class_names:
+                                    # 如果是专用模型，直接透传它认准的结果
+                                    # ！！！关键：在此处应用类别特定阈值过滤！！！
+                                    target_threshold = class_thresholds.get(s_name, 0.20)
+                                    if sc >= target_threshold:
+                                        detections.append({
+                                            'bbox': g_box,
+                                            'confidence': float(sc),
+                                            'class_id': int(sid),
+                                            'class_name': s_name
+                                        })
+                                else:
+                                    # 通用模型的映射逻辑
+                                    if s_name == 'cell phone' and sc >= class_thresholds.get('Phone', 0.25):
+                                        detections.append({
+                                            'bbox': g_box, 'confidence': float(sc),
+                                            'class_id': 1, 'class_name': 'Phone'
+                                        })
+                                    elif s_name in ['bottle', 'cup', 'wine glass'] and sc >= class_thresholds.get('Drink', 0.12):
+                                        detections.append({
+                                            'bbox': g_box, 'confidence': float(sc),
+                                            'class_id': 2, 'class_name': 'Drink'
+                                        })
+                                    elif s_name == 'cigarette' and sc >= class_thresholds.get('Smoke', 0.65):
+                                        detections.append({
+                                            'bbox': g_box, 'confidence': float(sc),
+                                            'class_id': 0, 'class_name': 'Smoke'
+                                        })
                     except Exception as e:
-                        logger.warning(f"局部检测失败: {e}")
+                        logger.warning(f"特写检测失败: {e}")
+            
+            # === 3. 非极大值抑制 (NMS) 去重 ===
+            # 目标：解决“一个行为被识别成好几种物体”以及框重叠的问题
+            if len(detections) > 1:
+                # 按置信度从高到低排序
+                detections.sort(key=lambda x: x['confidence'], reverse=True)
+                
+                keep_detections = []
+                while detections:
+                    best_det = detections.pop(0)
+                    keep_detections.append(best_det)
+                    
+                    # 过滤掉与当前最强框重叠严重的框
+                    remaining = []
+                    for det in detections:
+                        iou = self._calculate_iou(best_det['bbox'], det['bbox'])
+                        # 如果 IOU 较大 (重叠 > 45%)，认为是同一个目标，直接丢弃
+                        if iou < 0.45:
+                            remaining.append(det)
+                    detections = remaining
+                detections = keep_detections
             
             return {
                 'success': True,
@@ -208,6 +300,23 @@ class DetectionEngine:
                 'detections': [],
                 'num_detections': 0
             }
+    
+    def _calculate_iou(self, box1: List[float], box2: List[float]) -> float:
+        """计算两个边界框的交并比 (IOU)"""
+        x1_max = max(box1[0], box2[0])
+        y1_max = max(box1[1], box2[1])
+        x2_min = min(box1[2], box2[2])
+        y2_min = min(box1[3], box2[3])
+        
+        inter_width = max(0, x2_min - x1_max)
+        inter_height = max(0, y2_min - y1_max)
+        inter_area = inter_width * inter_height
+        
+        area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+        area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+        union_area = area1 + area2 - inter_area
+        
+        return inter_area / union_area if union_area > 0 else 0
     
     def draw_detections(self, image: np.ndarray, detections: List[Dict]) -> np.ndarray:
         """
